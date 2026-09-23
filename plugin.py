@@ -61,7 +61,13 @@ _EXT = {9: "flac", 3: "mp3", 1: "mp3"}
 _AUDIO_EXT = {".flac", ".mp3", ".m4a", ".ogg", ".opus", ".wav"}
 _EXPAND_ALBUMS = 3  # Deezer albums whose tracklists are fetched per search
 _REF_PREFIX = "deezer:"
-_CONCURRENT_TASKS = 2
+_CONCURRENT_TRACKS = 3  # per track, so a single never waits behind a whole album
+_TRACK_TIMEOUT = 600.0  # seconds; a track past this is failed and its slot freed
+_HTTP_TIMEOUT = 30  # default for every deezer-py request that sets none
+# Deezer's public API allows ~50 requests / 5 s per IP, and deezer-py answers a
+# quota error by sleeping and retrying forever. Searches here share that IP
+# with the downloads, so they stay well under the limit to leave room.
+_SEARCH_RATE = (25, 5.0)  # requests, per seconds
 # deemix errids that mean "your account/session", not "this track". They are
 # kept out of DownloadTaskStatus.error so DroppedNeedle never quarantines a
 # release for them (it blocklists any plugin failure that carries a message).
@@ -122,7 +128,9 @@ class Deeznutz:
         self._jobs: dict[str, _Job] = {}
         self._account_error = ""  # last account-level failure, shown in plugin health
         self._tasks: set[asyncio.Task] = set()
-        self._slots = asyncio.Semaphore(_CONCURRENT_TASKS)
+        self._slots = asyncio.Semaphore(_CONCURRENT_TRACKS)
+        self._search_times: list[float] = []
+        self._search_lock = asyncio.Lock()
 
     # ------------------------------------------------------------------ settings
 
@@ -158,6 +166,13 @@ class Deeznutz:
                 return self._dz
             Deezer, *_ = _deemix()
             dz = Deezer()
+            request = dz.session.request
+
+            def request_with_timeout(method, url, **kwargs):
+                kwargs.setdefault("timeout", _HTTP_TIMEOUT)
+                return request(method, url, **kwargs)
+
+            dz.session.request = request_with_timeout  # e.g. media.deezer.com/v1/get_url sets none
             if not dz.login_via_arl(arl):
                 raise RuntimeError("Deezer rejected the ARL - refresh it from deezer.com")
             if arl != self._dz_arl:
@@ -199,20 +214,30 @@ class Deeznutz:
         Downloader(dz, obj, self._deemix_settings(job.folder)).start()
 
     async def _run(self, job: _Job) -> None:
-        async with self._slots:
-            job.running = True
-            try:
-                for track_id in job.track_ids:
-                    if job.cancelled:
-                        break
+        job.running = True
+        try:
+            for track_id in job.track_ids:
+                if job.cancelled:
+                    break
+                async with self._slots:
                     try:
-                        await asyncio.to_thread(self._download_track, job, track_id)
+                        await asyncio.wait_for(
+                            asyncio.to_thread(self._download_track, job, track_id), _TRACK_TIMEOUT
+                        )
+                    except asyncio.TimeoutError:
+                        # The worker thread can't be killed; cancel it so deemix stops
+                        # at its next check, and free the slot for the next track.
+                        obj = job.objects.get(track_id)
+                        if obj is not None:
+                            obj.isCanceled = True
+                        self.log.warning("deeznutz: track %s timed out after %ds", track_id, _TRACK_TIMEOUT)
+                        job.errors[track_id] = f"timed out after {int(_TRACK_TIMEOUT)}s (Deezer slow or rate-limited)"
                     except Exception as exc:  # noqa: BLE001 - recorded per track
                         self.log.warning("deeznutz: track %s failed: %s", track_id, exc)
                         job.errors[track_id] = str(exc)
-            finally:
-                job.running = False
-                job.done = True
+        finally:
+            job.running = False
+            job.done = True
 
     def _start(self, job: _Job) -> None:
         self._jobs[job.task_id] = job
@@ -517,13 +542,33 @@ class Deeznutz:
     def indexer_name(self) -> str:
         return SOURCE
 
+    async def _throttle(self) -> None:
+        """Sliding-window limit on this plugin's own Deezer API calls."""
+        limit, window = _SEARCH_RATE
+        async with self._search_lock:
+            loop = asyncio.get_running_loop()
+            while True:
+                now = loop.time()
+                self._search_times = [t for t in self._search_times if now - t < window]
+                if len(self._search_times) < limit:
+                    self._search_times.append(now)
+                    return
+                await asyncio.sleep(window - (now - self._search_times[0]) + 0.05)
+
     async def _deezer(self, path: str, timeout: float, **params) -> list[dict]:
-        response = await self.ctx.http.get(f"{DEEZER_API}/{path}", params=params, timeout=timeout)
-        response.raise_for_status()
-        data = response.json()
-        if isinstance(data, dict) and data.get("error"):
-            raise RuntimeError(f"Deezer API error: {data['error']}")
-        return [d for d in (data or {}).get("data", []) if isinstance(d, dict)]
+        for attempt in range(3):
+            await self._throttle()
+            response = await self.ctx.http.get(f"{DEEZER_API}/{path}", params=params, timeout=timeout)
+            response.raise_for_status()
+            data = response.json()
+            error = data.get("error") if isinstance(data, dict) else None
+            if error and isinstance(error, dict) and error.get("code") in (4, 700) and attempt < 2:
+                await asyncio.sleep(5)  # quota exceeded: back off rather than fail the search
+                continue
+            if error:
+                raise RuntimeError(f"Deezer API error: {error}")
+            return [d for d in (data or {}).get("data", []) if isinstance(d, dict)]
+        return []
 
     def _match(self, artist: str, wanted: str, candidate_artist: str, candidate_title: str) -> float:
         scoring = getattr(self.ctx, "scoring", None)
