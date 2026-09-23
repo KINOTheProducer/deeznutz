@@ -31,12 +31,15 @@ DroppedNeedle's own packages always take precedence.
 - **Tracks only by default.** DroppedNeedle asks every source for a song as
   `search_album(artist, album, track_count=1)`; album requests carry the real track count.
   In `tracks` mode the plugin answers only song requests, so albums fall through to slskd.
-- **Files mode.** Each result is a Deezer tracklist: the song's album's best Deezer matches,
-  plus the artist's top tracks for songs whose album isn't on Deezer under that name.
-  DroppedNeedle's track matcher picks the file, and only that track is downloaded.
-- **Per-task folders.** Each task downloads into `<downloads dir>/<task id>/`. The handle holds
+- **Folder mode (for now).** Each result is one Deezer release. The plugin downloads its
+  tracks and DroppedNeedle matches them to the MusicBrainz tracklist. A one-track release
+  downloads just that track. A song request whose album is on Deezer downloads that album
+  and imports the matching song. Files mode, where DroppedNeedle picks the exact track, is
+  built in but switched off (`_FILES_MODE`): DroppedNeedle's file processor currently can't
+  resolve plugin clients, so files-mode imports always fail there.
+- **Per-attempt folders.** Each attempt downloads into `<downloads dir>/<task id>[-n]/`. The handle holds
   the Deezer track ids, so after a DroppedNeedle restart a task adopts its finished files or
-  restarts itself. At most 2 tasks download at once.
+  restarts itself. At most 3 tracks download at once, and searches stay under Deezer's rate limit.
 - **Quality.** FLAC by default. A track with no FLAC falls back to 320 instead of failing.
   DroppedNeedle rates the imported file by what actually arrived.
 - **Cleanup.** Cleanup removes a task folder only when it holds no audio.

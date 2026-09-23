@@ -61,6 +61,12 @@ _EXT = {9: "flac", 3: "mp3", 1: "mp3"}
 _AUDIO_EXT = {".flac", ".mp3", ".m4a", ".ogg", ".opus", ".wav"}
 _EXPAND_ALBUMS = 3  # Deezer albums whose tracklists are fetched per search
 _REF_PREFIX = "deezer:"
+# Files mode (DroppedNeedle picks exact tracks) needs the host's file processor
+# to resolve plugin clients, and today it is built without a client_resolver
+# (core/dependencies/service_providers.py _build_file_processor), so every
+# files-mode import fails as "downloaded file not found". Folder mode hands the
+# host the paths directly and works; flip this back once the host is fixed.
+_FILES_MODE = False
 _CONCURRENT_TRACKS = 3  # per track, so a single never waits behind a whole album
 _TRACK_TIMEOUT = 600.0  # seconds; a track past this is failed and its slot freed
 _HTTP_TIMEOUT = 30  # default for every deezer-py request that sets none
@@ -279,7 +285,7 @@ class Deeznutz:
     @staticmethod
     def _bitrate_from(handle_or_payload) -> int | None:
         raw = handle_or_payload if isinstance(handle_or_payload, str) else (handle_or_payload.plugin_token or "")
-        tail = raw.rpartition(":")[2]
+        tail = raw.split("|", 1)[0].rpartition(":")[2]
         return int(tail) if tail.isdigit() else None
 
     def _track_state(self, job: _Job | None, track_id: str) -> tuple[str, str | None, bool]:
@@ -352,13 +358,20 @@ class Deeznutz:
 
     async def enqueue(self, request: EnqueueRequest) -> TaskHandle:
         refs = [r for r in request.files if r.username.startswith(_REF_PREFIX)]
-        if not refs:
-            raise RuntimeError("deeznutz enqueue needs track files produced by the deeznutz indexer")
+        bitrate = self._bitrate_from(request.payload or "") or self._bitrate()[0]
+        if refs:  # files mode: exactly the tracks DroppedNeedle picked
+            track_ids = [r.username[len(_REF_PREFIX):] for r in refs]
+            filenames = [r.filename for r in refs]
+        else:  # folder mode: every track the release's payload names
+            parts = (request.payload or "").split("|")
+            track_ids = [t for t in (parts[1] if len(parts) > 1 else "").split(",") if t.isdigit()]
+            estimate = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+            filenames = [f"deezer-{t}.{_EXT.get(bitrate, 'flac')}" for t in track_ids]
+        if not track_ids:
+            raise RuntimeError("deeznutz enqueue needs a release produced by the deeznutz indexer")
         downloads = self._downloads_dir()
         if downloads is None:
             raise RuntimeError("Downloads directory is not configured")
-        track_ids = [r.username[len(_REF_PREFIX):] for r in refs]
-        bitrate = self._bitrate_from(request.payload or "") or self._bitrate()[0]
         # Fail fast on a bad ARL: an enqueue failure fails over without
         # blocklisting, unlike a failed download.
         try:
@@ -374,12 +387,12 @@ class Deeznutz:
             key = f"{request.task_id}-{attempt}"
         folder = downloads / key
         await asyncio.to_thread(folder.mkdir, parents=True, exist_ok=True)
-        self._start(_Job(key, track_ids, bitrate, folder, sum(r.size for r in refs)))
+        self._start(_Job(key, track_ids, bitrate, folder, sum(r.size for r in refs) if refs else estimate))
         self.log.info("deeznutz: downloading %d track(s) for task %s (attempt %d)", len(track_ids), request.task_id, attempt)
         return TaskHandle(
             source=SOURCE,
             job_name=f"droppedneedle-{key}",
-            filenames=[r.filename for r in refs],
+            filenames=filenames,
             nzo_id="|".join(track_ids),
             plugin_token=request.payload,
         )
@@ -615,6 +628,11 @@ class Deeznutz:
         return refs
 
     def _release(self, title: str, refs: list[DownloadFileRef], score: float, payload: str, bitrate: tuple) -> IndexerResult:
+        if not _FILES_MODE:
+            # Folder mode: the payload names every track (and the size estimate,
+            # for progress); enqueue downloads them all.
+            ids = ",".join(r.username[len(_REF_PREFIX):] for r in refs)
+            payload = f"{payload}|{ids}|{sum(r.size for r in refs)}"
         return IndexerResult(
             source=SOURCE,
             plugin=PluginSearchResult(
@@ -622,7 +640,7 @@ class Deeznutz:
                 size_bytes=sum(r.size for r in refs),
                 score=max(0.0, min(1.0, score)),
                 quality_tier=bitrate[1],
-                files=refs,
+                files=refs if _FILES_MODE else [],
                 payload=payload,
             ),
         )
@@ -679,7 +697,7 @@ class Deeznutz:
             return self._release(folder, refs, 0.6, f"artist:{artist['id']}:{bitrate[0]}", bitrate) if refs else None
 
         jobs = [expand(score, album) for score, album in albums]
-        if track_count == 1:
+        if track_count == 1 and _FILES_MODE:  # folder mode would fetch all 100
             jobs.append(top_tracks())
         results = []
         for outcome in await asyncio.gather(*jobs, return_exceptions=True):
