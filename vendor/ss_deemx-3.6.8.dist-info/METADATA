@@ -1,0 +1,24 @@
+Metadata-Version: 2.1
+Name: ss-deemx
+Version: 3.6.8
+Summary: *Deemx API, forked for spotify_sync
+Home-page: https://github.com/jbh-cloud/ss-deemx
+License: MIT
+Author: JBH
+Author-email: admin@jbh.cloud
+Requires-Python: >=3.8,<4.0
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.8
+Classifier: Programming Language :: Python :: 3.9
+Requires-Dist: click (>=8.1.3,<9.0.0)
+Requires-Dist: deezer-py (>=1.3.7,<2.0.0)
+Requires-Dist: mutagen (>=1.45.1,<2.0.0)
+Requires-Dist: pycryptodomex (>=3.15.0,<4.0.0)
+Requires-Dist: requests (>=2.25.1,<3.0.0)
+Requires-Dist: spotipy (>=2.11.0,<3.0.0)
+Project-URL: Repository, https://github.com/jbh-cloud/ss-deemx
+Description-Content-Type: text/markdown
+
+# dmx fork for spotify_sync

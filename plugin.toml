@@ -1,0 +1,48 @@
+[plugin]
+name = "deeznutz"
+display_name = "Deeznutz"
+version = "2.0.0"
+api_version = 1
+entrypoint = "plugin:Deeznutz"
+capabilities = ["download_client", "indexer"]
+description = "Finds individual songs on Deezer and downloads them in-process (deemix engine, no deemix server needed)."
+author = "Anthony"
+
+[[capability]]
+id = "download_client"
+source = "deeznutz"
+display_name = "Deeznutz"
+
+[[capability]]
+id = "indexer"
+target_source = "plugin:deeznutz"
+
+[[settings]]
+key = "arl"
+label = "Deezer ARL"
+help = "The arl cookie from a logged-in deezer.com session."
+secret = true
+
+[[settings]]
+key = "downloads_dir"
+label = "Downloads directory"
+help = "Folder inside DroppedNeedle where tracks are downloaded before import (one subfolder per task), e.g. /deeznutz-downloads"
+secret = false
+
+[[settings]]
+key = "mode"
+label = "Mode"
+help = "tracks = only answer single-song requests, leaving albums to slskd and other sources; all = albums too. Default: tracks"
+secret = false
+
+[[settings]]
+key = "bitrate"
+label = "Bitrate"
+help = "flac, 320 or 128. Default: flac (needs Deezer Premium/Family/HiFi; tracks without FLAC fall back to 320)."
+secret = false
+
+[[settings]]
+key = "max_results"
+label = "Max results per search"
+help = "How many Deezer album matches to consider per search (1-25). Default: 8"
+secret = false
