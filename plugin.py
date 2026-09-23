@@ -37,6 +37,7 @@ from pathlib import Path
 from models.common import ServiceStatus
 from infrastructure.plugins.protocols import (
     DownloadFileRef,
+    DownloadSearchResult,
     DownloadMaterialization,
     DownloadTaskStatus,
     EnqueueRequest,
@@ -502,7 +503,15 @@ class Deeznutz:
 
     @staticmethod
     def _refs(tracks: list[dict], folder: str, bitrate: tuple) -> list[DownloadFileRef]:
-        """Deezer tracks -> file refs DroppedNeedle's track matcher can score by name."""
+        """Deezer tracks -> file refs DroppedNeedle's track matcher can score by name.
+
+        Built as ``DownloadSearchResult`` (a superset of ``DownloadFileRef``):
+        when a one-track *album* request scores this release, DroppedNeedle's
+        plugin scorer copies ``release.files`` into ``ScoredCandidate.files``,
+        which is typed ``list[DownloadSearchResult]``; plain refs lack
+        ``parent_directory``/``extension`` and the saved search can't be read
+        back. Decoding ignores the extra fields wherever a ``DownloadFileRef``
+        is expected, so the richer shape is safe on every path."""
         bitrate_id, _, _, kbps = bitrate
         refs = []
         for n, track in enumerate(tracks, 1):
@@ -513,10 +522,15 @@ class Deeznutz:
             number = f"{disk}-{pos:02d}" if disk > 1 else f"{pos:02d}"
             artist = _clean((track.get("artist") or {}).get("name", ""))
             name = f"{number} - {artist} - {_clean(track.get('title', ''))}.{_EXT[bitrate_id]}"
-            refs.append(DownloadFileRef(
+            duration = int(track.get("duration") or 0)
+            refs.append(DownloadSearchResult(
                 username=f"{_REF_PREFIX}{track['id']}",
                 filename=f"{folder}/{name}",
-                size=int(track.get("duration") or 0) * kbps * 125,
+                parent_directory=folder,
+                size=duration * kbps * 125,
+                extension=_EXT[bitrate_id],
+                bitrate=None if bitrate_id == 9 else kbps,
+                duration=float(duration) or None,
             ))
         return refs
 
