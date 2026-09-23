@@ -230,8 +230,14 @@ class Deeznutz:
 
     @staticmethod
     def _task_id(handle: TaskHandle) -> str:
+        """The attempt key: ``<task id>`` or ``<task id>-<n>`` (also its folder name)."""
         name = handle.job_name or ""
         return name[len("droppedneedle-"):] if name.startswith("droppedneedle-") else name
+
+    @staticmethod
+    def _dn_task_id(key: str) -> str:
+        head, _, tail = key.rpartition("-")
+        return head if head and tail.isdigit() else key
 
     def _folder(self, task_id: str) -> Path | None:
         """``<downloads_dir>/<task_id>``, or None when the handle names no task.
@@ -335,13 +341,19 @@ class Deeznutz:
         except Exception as exc:
             self._account_error = str(exc)
             raise
-        folder = downloads / request.task_id
+        # One folder per attempt: a failover to another candidate re-enqueues
+        # the same task, and must not see (or import) the last attempt's files.
+        key, attempt = request.task_id, 1
+        while await asyncio.to_thread((downloads / key).exists):
+            attempt += 1
+            key = f"{request.task_id}-{attempt}"
+        folder = downloads / key
         await asyncio.to_thread(folder.mkdir, parents=True, exist_ok=True)
-        self._start(_Job(request.task_id, track_ids, bitrate, folder, sum(r.size for r in refs)))
-        self.log.info("deeznutz: downloading %d track(s) for task %s", len(track_ids), request.task_id)
+        self._start(_Job(key, track_ids, bitrate, folder, sum(r.size for r in refs)))
+        self.log.info("deeznutz: downloading %d track(s) for task %s (attempt %d)", len(track_ids), request.task_id, attempt)
         return TaskHandle(
             source=SOURCE,
-            job_name=request.job_name or f"droppedneedle-{request.task_id}",
+            job_name=f"droppedneedle-{key}",
             filenames=[r.filename for r in refs],
             nzo_id="|".join(track_ids),
             plugin_token=request.payload,
@@ -352,14 +364,14 @@ class Deeznutz:
         pairs = self._pairs(handle)
         folder = self._folder(task_id)
         if folder is None or not pairs:
-            return DownloadTaskStatus(task_id=task_id, status="failed", error=None)
+            return DownloadTaskStatus(task_id=self._dn_task_id(task_id), status="failed", error=None)
         job = self._jobs.get(task_id)
         if job is None:
             # DroppedNeedle restarted mid-task: adopt finished files or start over.
             found = [await asyncio.to_thread(self._file_for, None, folder, tid, name, len(pairs)) for name, tid in pairs]
             if pairs and all(found):
                 return DownloadTaskStatus(
-                    task_id=task_id, status="completed", files_total=len(pairs), files_completed=len(pairs),
+                    task_id=self._dn_task_id(task_id), status="completed", files_total=len(pairs), files_completed=len(pairs),
                     progress_percent=100.0, succeeded_filenames=[name for name, _ in pairs],
                 )
             bitrate = self._bitrate_from(handle) or self._bitrate()[0]
@@ -402,7 +414,7 @@ class Deeznutz:
         else:
             status = "failed"
         return DownloadTaskStatus(
-            task_id=task_id,
+            task_id=self._dn_task_id(task_id),
             status=status,
             files_total=total,
             files_completed=done,

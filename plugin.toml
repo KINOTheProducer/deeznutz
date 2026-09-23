@@ -1,7 +1,7 @@
 [plugin]
 name = "deeznutz"
 display_name = "Deeznutz"
-version = "2.0.2"
+version = "2.0.3"
 api_version = 1
 entrypoint = "plugin:Deeznutz"
 capabilities = ["download_client", "indexer"]
