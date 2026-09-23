@@ -233,8 +233,17 @@ class Deeznutz:
         name = handle.job_name or ""
         return name[len("droppedneedle-"):] if name.startswith("droppedneedle-") else name
 
-    def _folder(self, task_id: str) -> Path:
-        return (self._downloads_dir() or Path(".")) / task_id
+    def _folder(self, task_id: str) -> Path | None:
+        """``<downloads_dir>/<task_id>``, or None when the handle names no task.
+
+        A handle without a task id is DroppedNeedle's pre-enqueue placeholder
+        (the enqueue failed, so ours never replaced it). Resolving it to the
+        downloads root would hand cleanup the shared folder, so every caller
+        treats None as "nothing of ours here"."""
+        downloads = self._downloads_dir()
+        if downloads is None or not re.fullmatch(r"[A-Za-z0-9_-]+", task_id or ""):
+            return None
+        return downloads / task_id
 
     @staticmethod
     def _bitrate_from(handle_or_payload) -> int | None:
@@ -342,6 +351,8 @@ class Deeznutz:
         task_id = self._task_id(handle)
         pairs = self._pairs(handle)
         folder = self._folder(task_id)
+        if folder is None or not pairs:
+            return DownloadTaskStatus(task_id=task_id, status="failed", error=None)
         job = self._jobs.get(task_id)
         if job is None:
             # DroppedNeedle restarted mid-task: adopt finished files or start over.
@@ -420,6 +431,12 @@ class Deeznutz:
         task_id = self._task_id(handle)
         downloads = self._downloads_dir()
         folder = self._folder(task_id)
+        if folder is None:
+            return DownloadMaterialization(
+                state="missing",
+                mount_root=str(downloads or ""),
+                mount_healthy=bool(downloads) and await asyncio.to_thread(downloads.is_dir),
+            )
         job = self._jobs.get(task_id)
         files = await asyncio.to_thread(_audio_in, folder)
         if job is not None and job.running:
@@ -443,6 +460,8 @@ class Deeznutz:
         task_id = self._task_id(handle)
         job = self._jobs.pop(task_id, None)
         folder = self._folder(task_id)
+        if folder is None:
+            return False
 
         def _tidy() -> None:
             # Leftovers only (no audio): partial downloads, empty folders.
@@ -453,7 +472,8 @@ class Deeznutz:
         return job is not None
 
     async def list_completed_files(self, handle: TaskHandle) -> list[Path]:
-        return await asyncio.to_thread(_audio_in, self._folder(self._task_id(handle)))
+        folder = self._folder(self._task_id(handle))
+        return await asyncio.to_thread(_audio_in, folder) if folder else []
 
     async def get_file_path(
         self,
@@ -462,11 +482,14 @@ class Deeznutz:
         size: int | None = None,
     ) -> Path | None:
         task_id = self._task_id(handle)
+        folder = self._folder(task_id)
+        if folder is None:
+            return None
         pairs = self._pairs(handle)
         for name, tid in pairs:
             if name == remote_filename:
                 return await asyncio.to_thread(
-                    self._file_for, self._jobs.get(task_id), self._folder(task_id), tid, name, len(pairs)
+                    self._file_for, self._jobs.get(task_id), folder, tid, name, len(pairs)
                 )
         return None
 
